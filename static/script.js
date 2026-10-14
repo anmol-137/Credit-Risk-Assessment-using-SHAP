@@ -1,536 +1,413 @@
-/* ==========================================================
-   Underwrite: credit risk UI
-   - Talks to the FastAPI backend (/health and /predict)
-   - Animates the risk gauge
-   ========================================================== */
 
-(() => {
-  "use strict";
+"use strict";
 
-  // Leave empty when the UI is served by the same FastAPI app (recommended).
-  // If you host the UI somewhere else, set it to your API URL, e.g.
-  // "https://your-service.onrender.com" (and enable CORS on the API).
-  const API_BASE = "";
+// Same-origin requests: the frontend and API are hosted on the same Render service.
+const API_BASE = "";
 
-  const MIN_SCAN_MS = 1100;          // keep the "scoring" animation visible at least this long
-  const REQUEST_TIMEOUT_MS = 60000;  // free Render instances can take a while to wake up
-  const HEALTH_RETRIES = 12;
-  const HEALTH_RETRY_MS = 4000;
-  const MAX_HISTORY = 5;
+const form = document.getElementById("form");
+const apiStatus = document.getElementById("apiStatus");
+const apiStatusText = document.getElementById("apiStatusText");
 
-  /* ---------- Elements ---------- */
+const panel = document.getElementById("panel");
+const resultIndicator = document.getElementById("resultIndicator");
+const gaugeBox = document.getElementById("gaugeBox");
+const arcFill = document.getElementById("arcFill");
+const needle = document.getElementById("needle");
+const cutoffTick = document.getElementById("cutoffTick");
 
-  const $ = (sel) => document.querySelector(sel);
+const pct = document.getElementById("pct");
+const pctUnit = document.getElementById("pctUnit");
+const verdict = document.getElementById("verdict");
+const verdictIcon = document.getElementById("verdictIcon");
+const verdictText = document.getElementById("verdictText");
+const message = document.getElementById("message");
 
-  const form = $("#form");
-  const submitBtn = $("#submitBtn");
-  const btnText = $("#btnText");
-  const shareOut = $("#share");
-  const gradeError = $("#gradeError");
+const factProb = document.getElementById("factProb");
+const factCut = document.getElementById("factCut");
+const factGap = document.getElementById("factGap");
 
-  const panel = $("#panel");
-  const gaugeBox = $("#gaugeBox");
-  const needle = $("#needle");
-  const arcFill = $("#arcFill");
-  const zoneLow = $("#zoneLow");
-  const zoneHigh = $("#zoneHigh");
-  const cutoffTick = $("#cutoffTick");
+const share = document.getElementById("share");
+const gradeError = document.getElementById("gradeError");
+const submitBtn = document.getElementById("submitBtn");
+const btnText = document.getElementById("btnText");
+const sampleBtn = document.getElementById("sampleBtn");
+const resetBtn = document.getElementById("resetBtn");
+const historyList = document.getElementById("history");
+const historyCount = document.getElementById("historyCount");
 
-  const pctEl = $("#pct");
-  const pctUnit = $("#pctUnit");
-  const verdictEl = $("#verdict");
-  const verdictText = $("#verdictText");
-  const messageEl = $("#message");
-  const factsEl = $("#facts");
-  const factProb = $("#factProb");
-  const factCut = $("#factCut");
-  const factGap = $("#factGap");
-  const historyWrap = $("#historyWrap");
-  const historyList = $("#history");
+const MAX_HISTORY = 5;
+let assessments = [];
+let requestInProgress = false;
 
-  const statusEl = $("#status");
-  const statusText = $("#statusText");
+const sampleApplication = {
+  person_age: 28,
+  person_income: 600000,
+  person_home_ownership: "RENT",
+  person_emp_length: 4,
+  loan_intent: "PERSONAL",
+  loan_grade: "B",
+  loan_amnt: 120000,
+  loan_int_rate: 11.5,
+  cb_person_default_on_file: "N",
+  cb_person_cred_hist_length: 5
+};
 
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const isNarrow = () => window.matchMedia("(max-width: 960px)").matches;
+function setApiStatus(state, text) {
+  apiStatus.dataset.state = state;
+  apiStatusText.textContent = text;
+}
 
-  /* ---------- Small helpers ---------- */
+function formatPercent(value) {
+  return `${(value * 100).toFixed(2)}%`;
+}
 
-  const clamp01 = (n) => Math.min(1, Math.max(0, n));
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const pct1 = (p) => (p * 100).toFixed(1);
+function formatMoney(value) {
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0
+  }).format(value);
+}
 
-  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-  const easeOutBack = (t) => {
-    const c1 = 1.15;
-    const c3 = c1 + 1;
-    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+function showError(text) {
+  gradeError.textContent = text;
+  gradeError.hidden = false;
+}
+
+function clearError() {
+  gradeError.textContent = "";
+  gradeError.hidden = true;
+}
+
+function updateLoanRatio() {
+  const income = Number(document.getElementById("person_income").value);
+  const amount = Number(document.getElementById("loan_amnt").value);
+
+  if (
+    document.getElementById("person_income").value === "" ||
+    document.getElementById("loan_amnt").value === "" ||
+    !Number.isFinite(income) ||
+    !Number.isFinite(amount) ||
+    income <= 0 ||
+    amount < 0
+  ) {
+    share.textContent = "Enter income and loan amount";
+    return;
+  }
+
+  const ratio = amount / income;
+  share.textContent = `${ratio.toFixed(4)} (${(ratio * 100).toFixed(2)}%)`;
+}
+
+function setLoading(loading) {
+  requestInProgress = loading;
+  submitBtn.disabled = loading;
+  sampleBtn.disabled = loading;
+  resetBtn.disabled = loading;
+  btnText.textContent = loading ? "Assessing application…" : "Assess credit risk";
+
+  if (loading) {
+    panel.dataset.state = "loading";
+    resultIndicator.textContent = "PROCESSING";
+    verdictIcon.textContent = "…";
+    verdictText.textContent = "Assessment in progress";
+    message.textContent = "Your application is being evaluated by the deployed model.";
+  }
+}
+
+function resetResult() {
+  panel.dataset.state = "idle";
+  resultIndicator.textContent = "AWAITING INPUT";
+
+  pct.textContent = "—";
+  pctUnit.textContent = "%";
+
+  arcFill.style.strokeDasharray = "0 100";
+  needle.style.transform = "rotate(-90deg)";
+  cutoffTick.style.transform = "rotate(0deg)";
+  cutoffTick.style.transformOrigin = "160px 155px";
+
+  verdictIcon.textContent = "◎";
+  verdictText.textContent = "Ready to assess";
+  message.textContent = "Submit a borrower profile to generate a prediction.";
+
+  factProb.textContent = "—";
+  factCut.textContent = "—";
+  factGap.textContent = "—";
+}
+
+function showApiError(text) {
+  panel.dataset.state = "error";
+  resultIndicator.textContent = "ASSESSMENT FAILED";
+  verdictIcon.textContent = "!";
+  verdictText.textContent = "Unable to assess";
+  message.textContent = text;
+}
+
+function renderResult(data) {
+  const probability = Number(data.default_probability);
+  const threshold = Number(data.threshold);
+  const prediction = Number(data.default_prediction);
+
+  if (
+    !Number.isFinite(probability) ||
+    probability < 0 ||
+    probability > 1 ||
+    !Number.isFinite(threshold) ||
+    threshold < 0 ||
+    threshold > 1 ||
+    ![0, 1].includes(prediction)
+  ) {
+    throw new Error("The API returned an invalid prediction response.");
+  }
+
+  const isHighRisk = prediction === 1;
+  const gap = Math.abs(probability - threshold);
+
+  panel.dataset.state = isHighRisk ? "high" : "low";
+  gaugeBox.classList.add("has-result");
+
+  resultIndicator.textContent = isHighRisk ? "HIGH RISK" : "LOW RISK";
+
+  pct.textContent = (probability * 100).toFixed(2);
+  pctUnit.textContent = "%";
+
+  // The gauge arc is a semicircle, so 0–100% maps to 0–50 path units.
+  const arcUnits = probability * 50;
+  arcFill.style.strokeDasharray = `${arcUnits} 100`;
+
+  // The needle sweeps from the left end (-90°) to the right end (+90°).
+  const needleAngle = -90 + probability * 180;
+  needle.style.transform = `rotate(${needleAngle}deg)`;
+
+  // The threshold marker follows the same probability scale.
+  const thresholdAngle = -90 + threshold * 180;
+  cutoffTick.style.transform = `rotate(${thresholdAngle}deg)`;
+
+  verdictIcon.textContent = isHighRisk ? "!" : "✓";
+  verdictText.textContent = isHighRisk ? "Higher default risk" : "Lower default risk";
+
+  if (isHighRisk) {
+    message.textContent =
+      "The estimated probability meets or exceeds the model's decision threshold. Review the application carefully.";
+  } else {
+    message.textContent =
+      "The estimated probability is below the model's decision threshold. This does not guarantee repayment.";
+  }
+
+  factProb.textContent = formatPercent(probability);
+  factCut.textContent = formatPercent(threshold);
+  factGap.textContent = `${(gap * 100).toFixed(2)} pp`;
+
+  addHistory({
+    risk: isHighRisk ? "high" : "low",
+    probability,
+    age: Number(document.getElementById("person_age").value),
+    amount: Number(document.getElementById("loan_amnt").value)
+  });
+}
+
+function addHistory(item) {
+  assessments.unshift(item);
+  assessments = assessments.slice(0, MAX_HISTORY);
+
+  historyList.replaceChildren();
+
+  assessments.forEach((assessment) => {
+    const li = document.createElement("li");
+    li.className = assessment.risk;
+
+    const dot = document.createElement("span");
+    dot.className = "h-dot";
+    dot.setAttribute("aria-hidden", "true");
+
+    const description = document.createElement("span");
+    description.className = "h-desc";
+    description.textContent =
+      `${formatMoney(assessment.amount)} · Age ${assessment.age}`;
+
+    const value = document.createElement("span");
+    value.className = "h-val";
+    value.textContent = formatPercent(assessment.probability);
+
+    li.append(dot, description, value);
+    historyList.appendChild(li);
+  });
+
+  historyCount.textContent =
+    `${assessments.length} ${assessments.length === 1 ? "check" : "checks"}`;
+}
+
+async function checkApiHealth() {
+  try {
+    const response = await fetch(`${API_BASE}/health`, {
+      method: "GET",
+      headers: { Accept: "application/json" }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Health endpoint returned HTTP ${response.status}`);
+    }
+
+    const health = await response.json();
+
+    if (health.model_loaded === true && health.threshold_loaded === true) {
+      setApiStatus("online", "API and model online");
+    } else {
+      setApiStatus("offline", "API online · Model not ready");
+    }
+  } catch (error) {
+    console.error("API health check failed:", error);
+    setApiStatus("offline", "API unavailable");
+  }
+}
+
+function getPayload() {
+  const formData = new FormData(form);
+  const income = Number(formData.get("person_income"));
+  const amount = Number(formData.get("loan_amnt"));
+
+  if (!Number.isFinite(income) || income <= 0) {
+    throw new Error("Annual income must be greater than zero.");
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Loan amount must be greater than zero.");
+  }
+
+  const payload = {
+    person_age: Number(formData.get("person_age")),
+    person_income: income,
+    person_home_ownership: formData.get("person_home_ownership"),
+    person_emp_length: Number(formData.get("person_emp_length")),
+    loan_intent: formData.get("loan_intent"),
+    loan_grade: formData.get("loan_grade"),
+    loan_amnt: amount,
+    loan_int_rate: Number(formData.get("loan_int_rate")),
+    loan_percent_income: amount / income,
+    cb_person_default_on_file: formData.get("cb_person_default_on_file"),
+    cb_person_cred_hist_length: Number(
+      formData.get("cb_person_cred_hist_length")
+    )
   };
 
-  /* ==========================================================
-     Gauge
-     value is 0..1. The needle sweeps from -90deg to +90deg.
-     ========================================================== */
-
-  const gauge = { value: 0, raf: 0, scanning: false };
-
-  function renderGauge(p) {
-    const v = clamp01(p);
-    gauge.value = v;
-    needle.setAttribute("transform", `rotate(${-90 + v * 180} 150 150)`);
-    arcFill.setAttribute("stroke-dasharray", `${v * 100} 100`);
-  }
-
-  function setNumber(v) {
-    pctEl.textContent = pct1(Math.max(0, v));
-    pctUnit.hidden = false;
-  }
-
-  function clearNumber() {
-    pctEl.textContent = "—";
-    pctUnit.hidden = true;
-  }
-
-  function tween(to, duration, onNumber) {
-    cancelAnimationFrame(gauge.raf);
-    const from = gauge.value;
-
-    if (reduceMotion.matches || duration <= 0) {
-      renderGauge(to);
-      if (onNumber) onNumber(to);
-      return Promise.resolve();
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === null || value === "" || !Number.isFinite(
+      typeof value === "number" ? value : 0
+    )) {
+      throw new Error(`Please provide a valid value for ${key}.`);
     }
-
-    const start = performance.now();
-    return new Promise((resolve) => {
-      const step = (now) => {
-        const t = Math.min(1, (now - start) / duration);
-        renderGauge(from + (to - from) * easeOutBack(t));
-        if (onNumber) onNumber(from + (to - from) * easeOutCubic(t));
-        if (t < 1) {
-          gauge.raf = requestAnimationFrame(step);
-        } else {
-          renderGauge(to);
-          resolve();
-        }
-      };
-      gauge.raf = requestAnimationFrame(step);
-    });
   }
 
-  // Needle swings back and forth while the request is in flight.
-  function startScan() {
-    cancelAnimationFrame(gauge.raf);
-    gauge.scanning = true;
-    clearNumber();
-
-    if (reduceMotion.matches) {
-      renderGauge(0.5);
-      return;
-    }
-
-    const amp = 0.42;
-    const phase = Math.asin(Math.max(-1, Math.min(1, (gauge.value - 0.5) / amp)));
-    const t0 = performance.now();
-
-    const step = (now) => {
-      if (!gauge.scanning) return;
-      const s = (now - t0) / 1000;
-      renderGauge(0.5 + amp * Math.sin(s * 3.2 + phase));
-      gauge.raf = requestAnimationFrame(step);
-    };
-    gauge.raf = requestAnimationFrame(step);
+  if (payload.person_age < 18 || payload.person_age > 100) {
+    throw new Error("Applicant age must be between 18 and 100.");
   }
 
-  function stopScan() {
-    gauge.scanning = false;
-    cancelAnimationFrame(gauge.raf);
+  if (payload.person_emp_length < 0 || payload.person_emp_length > 100) {
+    throw new Error("Employment length must be between 0 and 100 years.");
   }
 
-  function setCutoff(t) {
-    const c = clamp01(t);
-    zoneLow.setAttribute("stroke-dasharray", `${c * 100} 100`);
-    zoneHigh.setAttribute("stroke-dasharray", `0 ${c * 100} ${(1 - c) * 100} 100`);
-    cutoffTick.setAttribute("transform", `rotate(${-90 + c * 180} 150 150)`);
-    gaugeBox.classList.add("has-result");
+  if (payload.loan_int_rate < 0 || payload.loan_int_rate > 100) {
+    throw new Error("Interest rate must be between 0 and 100%.");
   }
 
-  // One-time hello on page load: the needle sweeps across and settles at zero.
-  function introSweep() {
-    if (reduceMotion.matches) return;
-    setTimeout(async () => {
-      if (gauge.scanning || panel.dataset.state !== "idle") return;
-      await tween(0.55, 900);
-      if (gauge.scanning || panel.dataset.state !== "idle") return;
-      await tween(0, 900);
-    }, 500);
+  return payload;
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  if (requestInProgress) return;
+
+  clearError();
+
+  if (!form.reportValidity()) return;
+
+  let payload;
+
+  try {
+    payload = getPayload();
+  } catch (error) {
+    showError(error.message);
+    return;
   }
 
-  /* ==========================================================
-     Panel state
-     ========================================================== */
+  setLoading(true);
 
-  function setPanelState(state) {
-    panel.dataset.state = state;
-  }
-
-  function resetResultView() {
-    verdictEl.hidden = true;
-    factsEl.hidden = true;
-    gaugeBox.classList.remove("has-result");
-  }
-
-  /* ==========================================================
-     Form helpers
-     ========================================================== */
-
-  function updateShare() {
-    const income = parseFloat(form.elements.person_income.value);
-    const amount = parseFloat(form.elements.loan_amnt.value);
-
-    if (income > 0 && amount >= 0) {
-      const share = Math.round((amount / income) * 100) / 100;
-      shareOut.textContent = `${Math.round(share * 100)}%`;
-      shareOut.classList.add("has-value");
-      return share;
-    }
-
-    shareOut.textContent = "Calculated";
-    shareOut.classList.remove("has-value");
-    return null;
-  }
-
-  function collectPayload() {
-    const f = form.elements;
-    return {
-      person_age: Math.round(Number(f.person_age.value)),
-      person_income: Number(f.person_income.value),
-      person_home_ownership: f.person_home_ownership.value,
-      person_emp_length: Number(f.person_emp_length.value),
-      loan_intent: f.loan_intent.value,
-      loan_grade: f.loan_grade.value,
-      loan_amnt: Number(f.loan_amnt.value),
-      loan_int_rate: Number(f.loan_int_rate.value),
-      loan_percent_income: updateShare(),
-      cb_person_default_on_file: f.cb_person_default_on_file.value,
-      cb_person_cred_hist_length: Math.round(Number(f.cb_person_cred_hist_length.value)),
-    };
-  }
-
-  const SAMPLES = {
-    low: {
-      person_age: 36,
-      person_income: 92000,
-      person_home_ownership: "MORTGAGE",
-      person_emp_length: 9,
-      loan_intent: "HOMEIMPROVEMENT",
-      loan_grade: "A",
-      loan_amnt: 8000,
-      loan_int_rate: 7.5,
-      cb_person_default_on_file: "N",
-      cb_person_cred_hist_length: 12,
-    },
-    high: {
-      person_age: 23,
-      person_income: 26000,
-      person_home_ownership: "RENT",
-      person_emp_length: 1,
-      loan_intent: "MEDICAL",
-      loan_grade: "F",
-      loan_amnt: 14000,
-      loan_int_rate: 19.8,
-      cb_person_default_on_file: "Y",
-      cb_person_cred_hist_length: 2,
-    },
-  };
-
-  function fillSample(key) {
-    const data = SAMPLES[key];
-    if (!data) return;
-
-    Object.entries(data).forEach(([name, value]) => {
-      const radio = form.querySelector(`input[type="radio"][name="${name}"][value="${value}"]`);
-      if (radio) {
-        radio.checked = true;
-      } else if (form.elements[name]) {
-        form.elements[name].value = value;
-      }
+  try {
+    const response = await fetch(`${API_BASE}/predict`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(payload)
     });
 
-    clearGradeError();
-    updateShare();
-  }
+    const data = await response.json().catch(() => ({}));
 
-  function showGradeError() {
-    gradeError.hidden = false;
-    gradeError.previousElementSibling.previousElementSibling.classList.add("is-invalid");
-    const first = form.querySelector('input[name="loan_grade"]');
-    if (first) first.focus();
-  }
+    if (!response.ok) {
+      const detail = typeof data.detail === "string"
+        ? data.detail
+        : `The server returned HTTP ${response.status}.`;
 
-  function clearGradeError() {
-    gradeError.hidden = true;
-    gradeError.previousElementSibling.previousElementSibling.classList.remove("is-invalid");
-  }
-
-  function setBusy(busy) {
-    submitBtn.disabled = busy;
-    submitBtn.classList.toggle("is-busy", busy);
-    btnText.textContent = busy ? "Checking…" : "Check default risk";
-  }
-
-  /* ==========================================================
-     API
-     ========================================================== */
-
-  class ApiError extends Error {
-    constructor(kind, message) {
-      super(message);
-      this.kind = kind;
-    }
-  }
-
-  async function httpError(res) {
-    let detail = "";
-    try {
-      const body = await res.json();
-      detail = body.detail !== undefined ? body.detail : "";
-    } catch (_) {
-      /* response had no JSON body */
+      throw new Error(detail);
     }
 
-    if (res.status === 422 && Array.isArray(detail)) {
-      const items = detail.map((d) => {
-        const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : "value";
-        return `${String(field).replace(/_/g, " ")}: ${d.msg}`;
-      });
-      return new ApiError("validation", `Some values were rejected. ${items.join("; ")}.`);
-    }
+    renderResult(data);
+    setApiStatus("online", "API and model online");
+  } catch (error) {
+    console.error("Prediction request failed:", error);
+    showApiError(error.message || "An unexpected error occurred.");
+    setApiStatus("offline", "Prediction request failed");
+  } finally {
+    setLoading(false);
+  }
+});
 
-    if (res.status === 503) {
-      return new ApiError("unavailable", "The model isn't loaded yet. Try again in a few seconds.");
-    }
+sampleBtn.addEventListener("click", () => {
+  for (const [key, value] of Object.entries(sampleApplication)) {
+    const field = form.elements.namedItem(key);
 
-    if (res.status >= 500) {
-      const text = typeof detail === "string" && detail ? ` ${detail}` : "";
-      return new ApiError(
-        "server",
-        `The model couldn't score this application.${text} Check that the category values match what the model was trained on.`
+    if (!field) continue;
+
+    if (field instanceof RadioNodeList) {
+      const option = form.querySelector(
+        `input[name="${key}"][value="${value}"]`
       );
-    }
 
-    return new ApiError("http", `The request failed (status ${res.status}).`);
-  }
-
-  async function predict(payload) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      const res = await fetch(`${API_BASE}/predict`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: ctrl.signal,
-      });
-      if (!res.ok) throw await httpError(res);
-      return await res.json();
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      if (err.name === "AbortError") {
-        throw new ApiError("timeout", "The request took too long. Try again in a moment.");
-      }
-      throw new ApiError(
-        "network",
-        "Couldn't reach the API. If the service was idle it may still be starting, so wait a few seconds and try again."
-      );
-    } finally {
-      clearTimeout(timer);
+      if (option) option.checked = true;
+    } else {
+      field.value = String(value);
     }
   }
 
-  /* ==========================================================
-     Showing results
-     ========================================================== */
+  updateLoanRatio();
+  clearError();
+});
 
-  async function showResult(result, payload) {
-    const p = clamp01(Number(result.default_probability));
-    const t = clamp01(Number(result.threshold));
-    const high = Number(result.default_prediction) === 1;
-
-    setCutoff(t);
-    setPanelState(high ? "high" : "low");
-
-    await tween(p, 1500, setNumber);
-
-    verdictText.textContent = result.result || (high ? "High Risk" : "Low Risk");
-    verdictEl.hidden = false;
-
-    const relation = high ? "at or above" : "under";
-    const stance = high ? "high risk" : "low risk";
-    messageEl.textContent =
-      `The predicted default probability is ${pct1(p)}%, which is ${relation} the ` +
-      `${pct1(t)}% cutoff. The model treats this application as ${stance}.`;
-
-    const gap = Math.abs(p - t) * 100;
-    factProb.textContent = `${pct1(p)}%`;
-    factCut.textContent = `${pct1(t)}%`;
-    factGap.textContent = `${gap.toFixed(1)} pts ${p >= t ? "above" : "below"}`;
-    factsEl.hidden = false;
-
-    addHistory({ payload, p, high });
+form.addEventListener("input", (event) => {
+  if (
+    event.target.id === "person_income" ||
+    event.target.id === "loan_amnt"
+  ) {
+    updateLoanRatio();
   }
 
-  function showError(err) {
-    resetResultView();
-    setPanelState("error");
-    clearNumber();
-    messageEl.textContent = err.message || "Something went wrong. Try again.";
-    return tween(0, 600);
+  if (event.target.matches("input, select")) {
+    clearError();
   }
+});
 
-  /* ---------- Recent checks ---------- */
+form.addEventListener("change", clearError);
 
-  const history = [];
+form.addEventListener("reset", () => {
+  // Let the browser reset controls before refreshing derived output.
+  window.setTimeout(() => {
+    updateLoanRatio();
+    clearError();
+    resetResult();
+  }, 0);
+});
 
-  function addHistory(entry) {
-    history.unshift(entry);
-    if (history.length > MAX_HISTORY) history.pop();
-
-    historyList.textContent = "";
-    history.forEach(({ payload, p, high }) => {
-      const li = document.createElement("li");
-      li.className = high ? "is-high" : "is-low";
-
-      const dot = document.createElement("span");
-      dot.className = "h-dot";
-
-      const desc = document.createElement("span");
-      desc.className = "h-desc";
-      desc.textContent = `Grade ${payload.loan_grade}, ${payload.loan_amnt.toLocaleString()} loan`;
-
-      const val = document.createElement("span");
-      val.className = "h-val";
-      val.textContent = `${pct1(p)}%`;
-
-      li.append(dot, desc, val);
-      historyList.append(li);
-    });
-
-    historyWrap.hidden = false;
-  }
-
-  /* ==========================================================
-     Events
-     ========================================================== */
-
-  form.addEventListener("input", (e) => {
-    if (e.target.name === "person_income" || e.target.name === "loan_amnt") updateShare();
-  });
-
-  form.addEventListener("change", (e) => {
-    if (e.target.name === "loan_grade") clearGradeError();
-  });
-
-  form.addEventListener("reset", () => {
-    // Wait for the browser to clear the fields first.
-    setTimeout(() => {
-      updateShare();
-      clearGradeError();
-      stopScan();
-      resetResultView();
-      setPanelState("idle");
-      clearNumber();
-      messageEl.textContent = "Fill in the application and run the check. The result appears here.";
-      tween(0, 500);
-    }, 0);
-  });
-
-  document.querySelectorAll("[data-sample]").forEach((btn) => {
-    btn.addEventListener("click", () => fillSample(btn.dataset.sample));
-  });
-
-  let busy = false;
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (busy) return;
-
-    if (!form.reportValidity()) return;
-    if (!form.elements.loan_grade.value) {
-      showGradeError();
-      return;
-    }
-
-    const payload = collectPayload();
-
-    busy = true;
-    setBusy(true);
-    resetResultView();
-    setPanelState("loading");
-    messageEl.textContent = "Scoring the application…";
-    startScan();
-
-    if (isNarrow()) {
-      panel.scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth", block: "start" });
-    }
-
-    const started = performance.now();
-
-    try {
-      const result = await predict(payload);
-      const remaining = MIN_SCAN_MS - (performance.now() - started);
-      if (remaining > 0) await sleep(remaining);
-
-      stopScan();
-      await showResult(result, payload);
-    } catch (err) {
-      stopScan();
-      await showError(err);
-    } finally {
-      busy = false;
-      setBusy(false);
-    }
-  });
-
-  /* ==========================================================
-     API status chip (also wakes a sleeping Render instance)
-     ========================================================== */
-
-  function setStatus(state, text) {
-    statusEl.dataset.state = state;
-    statusText.textContent = text;
-  }
-
-  async function checkHealth(attempt = 0) {
-    setStatus(
-      "checking",
-      attempt === 0 ? "Connecting to model…" : "Waking the server, this can take a minute…"
-    );
-
-    try {
-      const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
-      if (!res.ok) throw new Error("health check failed");
-      const data = await res.json();
-
-      if (data.model_loaded && data.threshold_loaded) {
-        setStatus("online", "Model online");
-      } else {
-        setStatus("offline", "Model not loaded");
-      }
-    } catch (_) {
-      if (attempt < HEALTH_RETRIES) {
-        setTimeout(() => checkHealth(attempt + 1), HEALTH_RETRY_MS);
-      } else {
-        setStatus("offline", "API unreachable");
-      }
-    }
-  }
-
-  /* ---------- Start ---------- */
-
-  updateShare();
-  renderGauge(0);
-  introSweep();
-  checkHealth();
-})();
+checkApiHealth();
