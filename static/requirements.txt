@@ -1,0 +1,15 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pandas==2.2.3
+numpy==1.26.4
+joblib==1.4.2
+
+# IMPORTANT: use the exact scikit-learn version you trained the model with.
+# Run `pip show scikit-learn` in your training environment and change this line.
+scikit-learn==1.5.2
+
+# If your saved pipeline also uses any of these, uncomment the ones you need:
+# xgboost==2.1.3
+# lightgbm==4.5.0
+# imbalanced-learn==0.12.4

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Underwrite | Loan default risk check</title>
+  <meta name="description" content="Enter a loan application and get a machine-learning estimate of its default risk.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2310302B'/%3E%3Cpath d='M6 22a10 10 0 0 1 20 0' fill='none' stroke='%234FD6A6' stroke-width='3.5'/%3E%3Cpath d='M16 22l5-8' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="shell">
+
+    <header class="top">
+      <a class="brand" href="./" aria-label="Underwrite home">
+        <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="currentColor"/>
+          <path d="M6 22a10 10 0 0 1 20 0" fill="none" stroke="#4FD6A6" stroke-width="3.5"/>
+          <path d="M16 22l5-8" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span>Underwrite</span>
+      </a>
+
+      <div class="status" id="status" data-state="checking" role="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="statusText">Connecting to model…</span>
+      </div>
+    </header>
+
+    <main class="layout">
+
+      <!-- ============ Application form ============ -->
+      <section class="intake" aria-labelledby="pageTitle">
+        <h1 id="pageTitle">Will this loan be repaid?</h1>
+        <p class="lede">
+          Enter the application details. The model returns a default probability and
+          compares it with the cutoff chosen when it was trained.
+        </p>
+
+        <div class="samples">
+          <span>Try an example:</span>
+          <button type="button" class="link" data-sample="low">Low-risk applicant</button>
+          <button type="button" class="link" data-sample="high">High-risk applicant</button>
+        </div>
+
+        <form id="form" autocomplete="off">
+
+          <div class="group" role="group" aria-labelledby="g1">
+            <div class="group-head">
+              <h2 id="g1">Applicant</h2>
+              <p>Who is applying and how stable their income is.</p>
+            </div>
+            <div class="fields">
+              <div class="field">
+                <label for="person_age">Age</label>
+                <input id="person_age" name="person_age" type="number" inputmode="numeric" min="18" max="100" step="1" placeholder="32" required>
+              </div>
+              <div class="field">
+                <label for="person_income">Annual income</label>
+                <input id="person_income" name="person_income" type="number" inputmode="decimal" min="1" step="any" placeholder="65000" required>
+              </div>
+              <div class="field">
+                <label for="person_home_ownership">Home ownership</label>
+                <select id="person_home_ownership" name="person_home_ownership" required>
+                  <option value="" disabled selected>Select</option>
+                  <option value="RENT">Rent</option>
+                  <option value="OWN">Own</option>
+                  <option value="MORTGAGE">Mortgage</option>
+                  <option value="OTHER">Other</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="person_emp_length">Years employed</label>
+                <input id="person_emp_length" name="person_emp_length" type="number" inputmode="decimal" min="0" max="60" step="any" placeholder="4" required>
+              </div>
+            </div>
+          </div>
+
+          <div class="group" role="group" aria-labelledby="g2">
+            <div class="group-head">
+              <h2 id="g2">Loan</h2>
+              <p>What is being borrowed, and on what terms.</p>
+            </div>
+            <div class="fields">
+              <div class="field">
+                <label for="loan_intent">Purpose</label>
+                <select id="loan_intent" name="loan_intent" required>
+                  <option value="" disabled selected>Select</option>
+                  <option value="PERSONAL">Personal</option>
+                  <option value="EDUCATION">Education</option>
+                  <option value="MEDICAL">Medical</option>
+                  <option value="VENTURE">Business venture</option>
+                  <option value="HOMEIMPROVEMENT">Home improvement</option>
+                  <option value="DEBTCONSOLIDATION">Debt consolidation</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="loan_amnt">Loan amount</label>
+                <input id="loan_amnt" name="loan_amnt" type="number" inputmode="decimal" min="1" step="any" placeholder="10000" required>
+              </div>
+              <div class="field">
+                <label for="loan_int_rate">Interest rate (%)</label>
+                <input id="loan_int_rate" name="loan_int_rate" type="number" inputmode="decimal" min="0" max="40" step="any" placeholder="11.5" required>
+              </div>
+              <div class="field">
+                <label for="share">Loan as share of income</label>
+                <output id="share" class="derived" for="person_income loan_amnt">Calculated</output>
+              </div>
+              <div class="field wide">
+                <span class="label" id="gradeLabel">Loan grade</span>
+                <div class="seg grades" role="radiogroup" aria-labelledby="gradeLabel gradeHint">
+                  <label><input type="radio" name="loan_grade" value="A"><span>A</span></label>
+                  <label><input type="radio" name="loan_grade" value="B"><span>B</span></label>
+                  <label><input type="radio" name="loan_grade" value="C"><span>C</span></label>
+                  <label><input type="radio" name="loan_grade" value="D"><span>D</span></label>
+                  <label><input type="radio" name="loan_grade" value="E"><span>E</span></label>
+                  <label><input type="radio" name="loan_grade" value="F"><span>F</span></label>
+                  <label><input type="radio" name="loan_grade" value="G"><span>G</span></label>
+                </div>
+                <p class="hint" id="gradeHint">A is the strongest grade, G the weakest.</p>
+                <p class="field-error" id="gradeError" hidden>Choose a loan grade.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="group" role="group" aria-labelledby="g3">
+            <div class="group-head">
+              <h2 id="g3">Credit history</h2>
+              <p>What the credit bureau already knows.</p>
+            </div>
+            <div class="fields">
+              <div class="field">
+                <span class="label" id="defLabel">Defaulted before</span>
+                <div class="seg" role="radiogroup" aria-labelledby="defLabel">
+                  <label><input type="radio" name="cb_person_default_on_file" value="N" checked><span>No</span></label>
+                  <label><input type="radio" name="cb_person_default_on_file" value="Y"><span>Yes</span></label>
+                </div>
+              </div>
+              <div class="field">
+                <label for="cb_person_cred_hist_length">Credit history (years)</label>
+                <input id="cb_person_cred_hist_length" name="cb_person_cred_hist_length" type="number" inputmode="numeric" min="0" max="60" step="1" placeholder="6" required>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button type="submit" class="btn" id="submitBtn">
+              <span class="spin" aria-hidden="true"></span>
+              <span id="btnText">Check default risk</span>
+            </button>
+            <button type="reset" class="link" id="resetBtn">Clear form</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- ============ Result panel ============ -->
+      <aside class="panel" id="panel" data-state="idle" aria-labelledby="panelTitle">
+        <h2 id="panelTitle">Assessment</h2>
+
+        <div class="gauge" id="gaugeBox">
+          <svg id="gauge" viewBox="0 0 300 180" role="img" aria-label="Default risk gauge, from 0 to 100 percent">
+            <path class="g-base" d="M 40 150 A 110 110 0 0 1 260 150" pathLength="100"/>
+            <path id="zoneLow"  class="g-zone g-zone-low"  d="M 40 150 A 110 110 0 0 1 260 150" pathLength="100" stroke-dasharray="0 100"/>
+            <path id="zoneHigh" class="g-zone g-zone-high" d="M 40 150 A 110 110 0 0 1 260 150" pathLength="100" stroke-dasharray="0 100"/>
+            <path id="arcFill"  class="g-fill"             d="M 40 150 A 110 110 0 0 1 260 150" pathLength="100" stroke-dasharray="0 100"/>
+
+            <line id="cutoffTick" class="g-cutoff" x1="150" y1="56" x2="150" y2="22" transform="rotate(0 150 150)"/>
+
+            <g id="needle" transform="rotate(-90 150 150)">
+              <line class="g-needle" x1="150" y1="150" x2="150" y2="60"/>
+            </g>
+            <circle class="g-hub" cx="150" cy="150" r="10"/>
+            <circle class="g-hub-core" cx="150" cy="150" r="4"/>
+
+            <text class="g-end" x="40" y="174" text-anchor="middle">0%</text>
+            <text class="g-end" x="260" y="174" text-anchor="middle">100%</text>
+          </svg>
+        </div>
+
+        <div class="readout">
+          <div class="num" aria-hidden="true">
+            <span id="pct">—</span><span class="unit" id="pctUnit" hidden>%</span>
+          </div>
+          <p class="caption">chance of default</p>
+
+          <div class="verdict" id="verdict" hidden>
+            <span class="v-dot" aria-hidden="true"></span>
+            <span id="verdictText">Low risk</span>
+          </div>
+
+          <p class="message" id="message" aria-live="polite">
+            Fill in the application and run the check. The result appears here.
+          </p>
+        </div>
+
+        <dl class="facts" id="facts" hidden>
+          <div>
+            <dt>Default probability</dt>
+            <dd id="factProb">—</dd>
+          </div>
+          <div>
+            <dt><i class="swatch" aria-hidden="true"></i>Decision cutoff</dt>
+            <dd id="factCut">—</dd>
+          </div>
+          <div>
+            <dt>Distance from cutoff</dt>
+            <dd id="factGap">—</dd>
+          </div>
+        </dl>
+
+        <div class="history" id="historyWrap" hidden>
+          <h3>Recent checks</h3>
+          <ul id="history"></ul>
+        </div>
+
+        <p class="fine">
+          This is a statistical estimate. Use it to support a credit decision, not to replace one.
+        </p>
+      </aside>
+
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
